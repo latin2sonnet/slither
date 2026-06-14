@@ -28,6 +28,7 @@ const BULLET_SPEED = 18;
 const BULLET_RADIUS = 5;
 const BULLET_LIFE = 1800;
 const FIRE_COOLDOWN = 160;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'slitheradmin';
 
 let players = {};
 let foods = [];
@@ -36,10 +37,51 @@ let bullets = [];
 let nextFoodId = 1;
 let nextPowerupId = 1;
 let nextBulletId = 1;
+const bannedIds = new Set();
+const bannedNames = new Set();
 
 function rand(a, b) { return Math.random() * (b - a) + a; }
 function dist2(a, b) { const dx = a.x - b.x, dy = a.y - b.y; return dx * dx + dy * dy; }
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+function findPlayerIdByName(name) {
+  const n = String(name).toLowerCase();
+  for (const id in players) {
+    if (players[id].name.toLowerCase() === n) return id;
+  }
+  return null;
+}
+
+function kickByName(name) {
+  const id = findPlayerIdByName(name);
+  if (!id) return;
+  const s = io.sockets.sockets.get(id);
+  if (s) s.disconnect(true);
+  delete players[id];
+  console.log('admin kick:', name);
+}
+
+function banByName(name) {
+  const id = findPlayerIdByName(name);
+  bannedNames.add(String(name).toLowerCase());
+  if (id) {
+    bannedIds.add(id);
+    const s = io.sockets.sockets.get(id);
+    if (s) s.disconnect(true);
+    delete players[id];
+  }
+  console.log('admin ban:', name);
+}
+
+function killByName(name) {
+  const id = findPlayerIdByName(name);
+  if (id && players[id]) killPlayer(players[id]);
+  console.log('admin kill:', name);
+}
+
+function announce(msg) {
+  io.emit('announce', String(msg).slice(0, 200));
+}
 
 function spawnFood(count = 1) {
   for (let i = 0; i < count; i++) {
@@ -420,6 +462,12 @@ io.on('connection', (socket) => {
       socket.emit('error', 'Server is full');
       return;
     }
+    const cleanName = String(name || 'Snake');
+    if (bannedIds.has(socket.id) || bannedNames.has(cleanName.toLowerCase())) {
+      socket.emit('error', 'You are banned');
+      socket.disconnect(true);
+      return;
+    }
     players[socket.id] = createPlayer(socket.id, name);
   });
 
@@ -429,6 +477,14 @@ io.on('connection', (socket) => {
     if (typeof data.angle === 'number') p.targetAngle = data.angle;
     if (typeof data.boost === 'boolean') p.boosting = data.boost;
     if (data.shoot) shootBullet(p);
+  });
+
+  socket.on('admin', ({ password, action, target }) => {
+    if (password !== ADMIN_PASSWORD) return;
+    if (action === 'kick') kickByName(target);
+    else if (action === 'ban') banByName(target);
+    else if (action === 'kill') killByName(target);
+    else if (action === 'announce') announce(target);
   });
 
   socket.on('disconnect', () => {

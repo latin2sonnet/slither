@@ -96,6 +96,11 @@ export default function Home() {
   const [score, setScore] = useState(10);
   const [leaderboard, setLeaderboard] = useState([]);
   const [hud, setHud] = useState({ ammo: 0, cocaine: 0 });
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [adminPwd, setAdminPwd] = useState('');
+  const [adminAction, setAdminAction] = useState('kick');
+  const [adminTarget, setAdminTarget] = useState('');
+  const [announce, setAnnounce] = useState('');
 
   // Load saved defaults and set up HiDPI canvas
   useEffect(() => {
@@ -195,6 +200,11 @@ export default function Home() {
       socket.on('error', (msg) => {
         setStatusMsg('Server error: ' + msg);
         setPlayDisabled(false);
+      });
+
+      socket.on('announce', (msg) => {
+        setAnnounce(msg);
+        setTimeout(() => setAnnounce(''), 4000);
       });
     } catch (err) {
       setStatusMsg('Failed to load socket client: ' + err.message);
@@ -364,6 +374,13 @@ export default function Home() {
     ctx.fillStyle = '#fff';
     ctx.fillText(s.name, head.x, head.y - baseR - 6);
     ctx.restore();
+  }
+
+  function sendAdmin() {
+    const socket = socketRef.current;
+    if (!socket) return;
+    socket.emit('admin', { password: adminPwd, action: adminAction, target: adminTarget });
+    setAdminTarget('');
   }
 
   function drawPowerup(ctx, pu) {
@@ -539,6 +556,11 @@ export default function Home() {
     const onKeyDown = (e) => {
       if (e.code === 'Space') mouseRef.current.down = true;
       if (e.code === 'KeyE') shootRef.current = true;
+      if (e.key === '`' || e.key === '~') {
+        e.preventDefault();
+        setAdminOpen((v) => !v);
+      }
+      if (e.code === 'Escape') setAdminOpen(false);
     };
     const onKeyUp = (e) => { if (e.code === 'Space') mouseRef.current.down = false; };
     const onTouchStart = (e) => {
@@ -618,6 +640,31 @@ export default function Home() {
             <div className="status">{status}</div>
           </div>
         )}
+        {adminOpen && (
+          <div className="adminPanel">
+            <h4>Admin</h4>
+            <input
+              type="password"
+              placeholder="Password"
+              value={adminPwd}
+              onChange={(e) => setAdminPwd(e.target.value)}
+            />
+            <select value={adminAction} onChange={(e) => setAdminAction(e.target.value)}>
+              <option value="kick">Kick</option>
+              <option value="ban">Ban</option>
+              <option value="kill">Kill</option>
+              <option value="announce">Announce</option>
+            </select>
+            <input
+              type="text"
+              placeholder="Target name / message"
+              value={adminTarget}
+              onChange={(e) => setAdminTarget(e.target.value)}
+            />
+            <button onClick={sendAdmin}>Execute</button>
+          </div>
+        )}
+        {announce && <div className="announcement">{announce}</div>}
         <div className="lengthBar"><div className="lengthBarFill" style={{ width: Math.min(100, (score / 200) * 100) + '%' }} /></div>
         <div className="controlsTip">Move to steer • Click/Space to boost • Right-click or E to shoot • Pick up C/G powerups</div>
       </div>
