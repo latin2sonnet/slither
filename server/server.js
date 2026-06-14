@@ -9,15 +9,20 @@ const io = new Server(server, {
     origin: '*',
     methods: ['GET', 'POST']
   },
-  transports: ['websocket', 'polling']
+  transports: ['websocket', 'polling'],
+  // keep payloads lean
+  perMessageDeflate: false,
+  maxHttpBufferSize: 1e6
 });
 
 const PORT = process.env.PORT || 3000;
 const WORLD = 4000;
 const TICK_RATE = 1000 / 30;        // 30 ticks per second
-const MAX_FOOD = 600;
-const MAX_PLAYERS = 40;
+const MAX_FOOD = 500;
+const MAX_PLAYERS = 30;
+const MAX_SEGMENTS = 250;           // hard cap on physics/render points per snake
 const VIEW_RADIUS = 1800;
+const CELL = 60;                    // spatial grid cell size
 const COLORS = ['#5be','#6b6','#f75','#f5c','#a6f','#fd6','#6ff','#f66','#9f7','#79f'];
 
 let players = {};
@@ -57,7 +62,7 @@ function createPlayer(id, name) {
     targetAngle: angle,
     segments: [],
     radius: 12,
-    speed: 2.6,
+    speed: 2.8,
     score: 10,
     boosting: false,
     alive: true,
@@ -66,7 +71,7 @@ function createPlayer(id, name) {
     maxLength: 10
   };
   for (let i = 0; i < p.maxLength; i++) {
-    p.segments.push({ x: x - i * p.radius * 0.65, y });
+    p.segments.push({ x: x - i * p.radius * 0.7, y });
   }
   return p;
 }
@@ -118,7 +123,6 @@ function updatePlayer(p) {
   nx = clamp(nx, -WORLD / 2, WORLD / 2);
   ny = clamp(ny, -WORLD / 2, WORLD / 2);
 
-  // bounce off walls
   if (nx <= -WORLD / 2 || nx >= WORLD / 2) p.angle = Math.PI - p.angle;
   if (ny <= -WORLD / 2 || ny >= WORLD / 2) p.angle = -p.angle;
 
@@ -128,8 +132,8 @@ function updatePlayer(p) {
 
   p.score = Math.max(10, p.score);
   p.radius = 10 + Math.log10(p.score) * 3.2;
-  const spacing = p.radius * 0.65;
-  p.maxLength = Math.max(10, Math.floor(p.score * 1.2));
+  const spacing = p.radius * 0.7;
+  p.maxLength = Math.min(MAX_SEGMENTS, Math.max(10, Math.floor(p.score * 1.2)));
   p.segments = resampleSegments(p.segments, { x: p.x, y: p.y }, p.maxLength, spacing);
 }
 
@@ -138,7 +142,6 @@ function killPlayer(p) {
   p.alive = false;
   p.deadTimer = 0;
   p.respawnDelay = rand(0, 4);
-  // drop food along body
   for (let i = 0; i < p.segments.length; i += 2) {
     const s = p.segments[i];
     if (foods.length >= MAX_FOOD) break;
@@ -171,7 +174,48 @@ function respawnPlayer(p) {
   p.segments = [];
   p.maxLength = 10;
   for (let i = 0; i < p.maxLength; i++) {
-    p.segments.push({ x: x - i * p.radius * 0.65, y });
+    p.segments.push({ x: x - i * p.radius * 0.7, y });
+  }
+}
+
+function gridKey(x, y) {
+  return `${Math.floor(x / CELL)},${Math.floor(y / CELL)}`;
+}
+
+function checkCollisions() {
+  const grid = new Map();
+  for (const id in players) {
+    const p = players[id];
+    if (!p.alive) continue;
+    for (const seg of p.segments) {
+      const k = gridKey(seg.x, seg.y);
+      if (!grid.has(k)) grid.set(k, []);
+      grid.get(k).push({ id, x: seg.x, y: seg.y });
+    }
+  }
+
+  for (const id in players) {
+    const p = players[id];
+    if (!p.alive) continue;
+    const cx = Math.floor(p.x / CELL);
+    const cy = Math.floor(p.y / CELL);
+    let killed = false;
+    for (let gx = cx - 1; gx <= cx + 1 && !killed; gx++) {
+      for (let gy = cy - 1; gy <= cy + 1 && !killed; gy++) {
+        const list = grid.get(`${gx},${gy}`);
+        if (!list) continue;
+        for (const seg of list) {
+          if (seg.id === p.id) continue;
+          const q = players[seg.id];
+          const minR = p.radius + q.radius;
+          if (dist2({ x: p.x, y: p.y }, seg) < minR * minR) {
+            killPlayer(p);
+            killed = true;
+            break;
+          }
+        }
+      }
+    }
   }
 }
 
@@ -198,65 +242,52 @@ function gameTick() {
   }
   spawnFood(eaten);
 
-  // snake-vs-snake collisions
+  // snake-vs-snake collisions (spatial grid)
+  checkCollisions();
+
+  // emit state per-player with only nearby entities
   const ids = Object.keys(players);
-  for (let i = 0; i < ids.length; i++) {
-    const p = players[ids[i]];
-    if (!p.alive) continue;
-    for (let j = 0; j < ids.length; j++) {
-      if (i === j) continue;
-      const q = players[ids[j]];
-      if (!q.alive) continue;
-      const minR = p.radius + q.radius;
-      const minR2 = minR * minR;
-      for (const seg of q.segments) {
-        if (dist2({ x: p.x, y: p.y }, seg) < minR2) {
-          killPlayer(p);
-          break;
-        }
-      }
-      if (!p.alive) break;
-    }
-  }
-
-  // build player list once
-  const playerList = ids.map(id => {
-    const p = players[id];
-    return {
-      id: p.id,
-      name: p.name,
-      color: p.color,
-      x: p.x,
-      y: p.y,
-      angle: p.angle,
-      radius: p.radius,
-      score: Math.floor(p.score),
-      alive: p.alive,
-      segments: p.segments
-    };
-  });
-
-  // send state to each player with only nearby food
   for (const id of ids) {
-    const p = players[id];
+    const viewer = players[id];
+    const px = viewer.x;
+    const py = viewer.y;
+
+    const visiblePlayers = [];
+    for (const otherId of ids) {
+      const q = players[otherId];
+      if (Math.abs(q.x - px) < VIEW_RADIUS && Math.abs(q.y - py) < VIEW_RADIUS) {
+        visiblePlayers.push({
+          id: q.id,
+          name: q.name,
+          color: q.color,
+          x: q.x,
+          y: q.y,
+          angle: q.angle,
+          radius: q.radius,
+          score: Math.floor(q.score),
+          alive: q.alive,
+          segments: q.segments
+        });
+      }
+    }
+
     const visibleFoods = [];
     for (const f of foods) {
-      if (Math.abs(f.x - p.x) < VIEW_RADIUS && Math.abs(f.y - p.y) < VIEW_RADIUS) {
+      if (Math.abs(f.x - px) < VIEW_RADIUS && Math.abs(f.y - py) < VIEW_RADIUS) {
         visibleFoods.push(f);
       }
     }
+
     io.to(id).emit('state', {
       t: Date.now(),
       world: WORLD,
       foods: visibleFoods,
-      players: playerList
+      players: visiblePlayers
     });
   }
 }
 
-// fill initial food
 spawnFood(MAX_FOOD);
-
 setInterval(gameTick, TICK_RATE);
 
 io.on('connection', (socket) => {
