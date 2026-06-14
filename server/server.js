@@ -174,9 +174,12 @@ function killPlayer(p) {
   p.respawnDelay = rand(0, 4);
   p.boosting = false;
 
+  // Always make room so death loot actually spawns
+  const dropCount = p.segments.length;
+  while (foods.length > MAX_FOOD - dropCount) foods.shift();
+
   // Drop a food pellet for every segment so the killer grows big
   for (const s of p.segments) {
-    if (foods.length >= MAX_FOOD) break;
     foods.push({
       id: nextFoodId++,
       x: s.x + rand(-10, 10),
@@ -189,6 +192,8 @@ function killPlayer(p) {
 
   // Small chance to drop a powerup from the corpse
   if (Math.random() < 0.3) spawnPowerup(p.x, p.y);
+
+  console.log('killPlayer', p.id, 'dropped', dropCount, 'food. total:', foods.length);
 }
 
 function respawnPlayer(p) {
