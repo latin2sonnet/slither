@@ -65,7 +65,13 @@ function interpolateStates(a, b, alpha) {
     }
   }
 
-  return { world: b.world, players, foods };
+  return {
+    world: b.world,
+    players,
+    foods,
+    powerups: b.powerups || [],
+    bullets: b.bullets || []
+  };
 }
 
 export default function Home() {
@@ -75,6 +81,7 @@ export default function Home() {
   const snapshotsRef = useRef([]);
   const myIdRef = useRef(null);
   const mouseRef = useRef({ x: 0, y: 0, down: false });
+  const shootRef = useRef(false);
   const cameraRef = useRef({ x: 0, y: 0, scale: 1 });
   const dprRef = useRef(1);
   const rafRef = useRef(null);
@@ -88,6 +95,7 @@ export default function Home() {
   const [playDisabled, setPlayDisabled] = useState(false);
   const [score, setScore] = useState(10);
   const [leaderboard, setLeaderboard] = useState([]);
+  const [hud, setHud] = useState({ ammo: 0, cocaine: 0 });
 
   // Load saved defaults and set up HiDPI canvas
   useEffect(() => {
@@ -213,7 +221,9 @@ export default function Home() {
     const cx = window.innerWidth / 2;
     const cy = window.innerHeight / 2;
     const angle = Math.atan2(mouseRef.current.y - cy, mouseRef.current.x - cx);
-    socket.emit('input', { angle, boost: mouseRef.current.down });
+    const shoot = shootRef.current;
+    shootRef.current = false;
+    socket.emit('input', { angle, boost: mouseRef.current.down, shoot });
   }
 
   function updateUI() {
@@ -223,8 +233,10 @@ export default function Home() {
     if (me) {
       if (overlayVisible) setOverlayVisible(false);
       setScore(Math.floor(me.score));
+      setHud({ ammo: me.ammo || 0, cocaine: me.cocaineTimer || 0 });
     } else {
       if (!overlayVisible && connectedRef.current) setOverlayVisible(true);
+      setHud({ ammo: 0, cocaine: 0 });
     }
 
     const board = state.players.slice().sort((a, b) => b.score - a.score).slice(0, 8);
@@ -269,9 +281,10 @@ export default function Home() {
     ctx.lineJoin = 'round';
 
     // Neon glow shadow
+    const coked = (s.cocaineTimer || 0) > 0;
     ctx.save();
-    ctx.shadowBlur = baseR * (s.boosting ? 2.8 : 1.6);
-    ctx.shadowColor = s.color;
+    ctx.shadowBlur = baseR * ((s.boosting || coked) ? 3.0 : 1.6);
+    ctx.shadowColor = coked ? '#ffffff' : s.color;
 
     // Dark outline
     ctx.lineWidth = baseR * 2.6;
@@ -350,6 +363,50 @@ export default function Home() {
     ctx.fillText(s.name, head.x, head.y - baseR - 5);
     ctx.fillStyle = '#fff';
     ctx.fillText(s.name, head.x, head.y - baseR - 6);
+    ctx.restore();
+  }
+
+  function drawPowerup(ctx, pu) {
+    ctx.save();
+    ctx.translate(pu.x, pu.y);
+    if (pu.type === 'cocaine') {
+      ctx.shadowBlur = 20;
+      ctx.shadowColor = '#ffffff';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(-7, -9, 14, 18);
+      ctx.fillStyle = '#999';
+      ctx.font = 'bold 10px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('C', 0, 0);
+    } else {
+      // Glock 17
+      ctx.shadowBlur = 20;
+      ctx.shadowColor = '#39ff14';
+      ctx.fillStyle = '#2a2a2a';
+      ctx.fillRect(-10, -4, 18, 6); // barrel/slide
+      ctx.fillRect(2, 2, 5, 9);     // grip
+      ctx.fillStyle = '#39ff14';
+      ctx.font = 'bold 10px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('G', 0, -7);
+    }
+    ctx.restore();
+  }
+
+  function drawBullet(ctx, b) {
+    ctx.save();
+    ctx.shadowBlur = 12;
+    ctx.shadowColor = '#ffea00';
+    ctx.fillStyle = '#ffea00';
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 0.4;
+    ctx.beginPath();
+    ctx.arc(b.x - Math.cos(b.angle) * 8, b.y - Math.sin(b.angle) * 8, b.radius * 0.6, 0, Math.PI * 2);
+    ctx.fill();
     ctx.restore();
   }
 
@@ -445,6 +502,18 @@ export default function Home() {
       }
     }
 
+    if (state.powerups) {
+      for (const pu of state.powerups) {
+        drawPowerup(ctx, pu);
+      }
+    }
+
+    if (state.bullets) {
+      for (const b of state.bullets) {
+        drawBullet(ctx, b);
+      }
+    }
+
     const snakes = state.players.slice().sort((a, b) => a.score - b.score);
     for (const s of snakes) drawSnake(s);
 
@@ -459,9 +528,18 @@ export default function Home() {
       mouseRef.current.x = e.clientX;
       mouseRef.current.y = e.clientY;
     };
-    const onDown = () => (mouseRef.current.down = true);
-    const onUp = () => (mouseRef.current.down = false);
-    const onKeyDown = (e) => { if (e.code === 'Space') mouseRef.current.down = true; };
+    const onDown = (e) => {
+      if (e.button === 2) shootRef.current = true;
+      else mouseRef.current.down = true;
+    };
+    const onUp = (e) => {
+      if (e.button !== 2) mouseRef.current.down = false;
+    };
+    const onContextMenu = (e) => e.preventDefault();
+    const onKeyDown = (e) => {
+      if (e.code === 'Space') mouseRef.current.down = true;
+      if (e.code === 'KeyE') shootRef.current = true;
+    };
     const onKeyUp = (e) => { if (e.code === 'Space') mouseRef.current.down = false; };
     const onTouchStart = (e) => {
       mouseRef.current.down = true;
@@ -478,6 +556,7 @@ export default function Home() {
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mousedown', onDown);
     window.addEventListener('mouseup', onUp);
+    window.addEventListener('contextmenu', onContextMenu);
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('touchstart', onTouchStart, { passive: false });
@@ -488,6 +567,7 @@ export default function Home() {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mousedown', onDown);
       window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('contextmenu', onContextMenu);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('touchstart', onTouchStart);
@@ -500,7 +580,13 @@ export default function Home() {
     <>
       <canvas ref={canvasRef} />
       <div className="ui">
-        <div className="score">Length: {score}</div>
+        <div className="hud">
+          <div className="score">Length: {score}</div>
+          {hud.ammo > 0 && <div className="ammo">Glock 17: {hud.ammo}</div>}
+          {hud.cocaine > 0 && (
+            <div className="cokeBar"><div className="cokeFill" style={{ width: Math.min(100, (hud.cocaine / 5000) * 100) + '%' }} /></div>
+          )}
+        </div>
         <div className="leaderboard">
           <h3>Leaderboard</h3>
           <ol>
@@ -533,7 +619,7 @@ export default function Home() {
           </div>
         )}
         <div className="lengthBar"><div className="lengthBarFill" style={{ width: Math.min(100, (score / 200) * 100) + '%' }} /></div>
-        <div className="controlsTip">Move mouse/finger to steer • Click / Space / hold to boost</div>
+        <div className="controlsTip">Move to steer • Click/Space to boost • Right-click or E to shoot • Pick up C/G powerups</div>
       </div>
     </>
   );

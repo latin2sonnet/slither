@@ -29,13 +29,39 @@ canvas {
   justify-content: space-between;
 }
 
-.score {
+.hud {
   position: absolute;
   top: 10px;
   left: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   color: #fff;
-  font-size: 18px;
   text-shadow: 0 1px 3px rgba(0,0,0,.7);
+}
+
+.score {
+  font-size: 18px;
+}
+
+.ammo {
+  font-size: 14px;
+  color: #39ff14;
+  font-weight: bold;
+}
+
+.cokeBar {
+  width: 120px;
+  height: 6px;
+  background: rgba(255,255,255,0.2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.cokeFill {
+  height: 100%;
+  background: #fff;
+  box-shadow: 0 0 8px #fff;
 }
 
 .leaderboard {
