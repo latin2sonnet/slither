@@ -62,7 +62,7 @@ function createPlayer(id, name) {
     targetAngle: angle,
     segments: [],
     radius: 12,
-    speed: 2.8,
+    speed: 5,
     score: 10,
     boosting: false,
     alive: true,
@@ -115,7 +115,7 @@ function updatePlayer(p) {
   let diff = p.targetAngle - p.angle;
   while (diff > Math.PI) diff -= Math.PI * 2;
   while (diff < -Math.PI) diff += Math.PI * 2;
-  diff = clamp(diff, -0.06, 0.06);
+  diff = clamp(diff, -0.10, 0.10);
   p.angle += diff;
 
   let nx = p.x + Math.cos(p.angle) * speed;
@@ -266,6 +266,7 @@ function gameTick() {
           radius: q.radius,
           score: Math.floor(q.score),
           alive: q.alive,
+          boosting: q.boosting,
           segments: q.segments
         });
       }

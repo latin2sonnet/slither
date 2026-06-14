@@ -1,12 +1,82 @@
 import { useEffect, useRef, useState } from 'react';
 
+const RENDER_DELAY = 100; // ms behind newest snapshot
+const SNAPSHOT_BUFFER = 8;
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function lerpAngle(a, b, t) {
+  let d = b - a;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
+}
+
+function cloneSegments(segs) {
+  if (!segs) return [];
+  return segs.map((s) => ({ x: s.x, y: s.y }));
+}
+
+function interpolateStates(a, b, alpha) {
+  // Interpolate players
+  const players = [];
+  const oldMap = new Map((a.players || []).map((p) => [p.id, p]));
+
+  for (const np of b.players || []) {
+    const op = oldMap.get(np.id);
+    if (op && op.alive === np.alive) {
+      const p = { ...np };
+      p.x = lerp(op.x, np.x, alpha);
+      p.y = lerp(op.y, np.y, alpha);
+      p.angle = lerpAngle(op.angle, np.angle, alpha);
+      p.radius = lerp(op.radius || 12, np.radius || 12, alpha);
+      p.score = lerp(op.score || 0, np.score || 0, alpha);
+
+      const len = Math.max(op.segments?.length || 0, np.segments?.length || 0);
+      p.segments = [];
+      for (let i = 0; i < len; i++) {
+        const os = op.segments?.[i];
+        const ns = np.segments?.[i];
+        if (os && ns) {
+          p.segments.push({ x: lerp(os.x, ns.x, alpha), y: lerp(os.y, ns.y, alpha) });
+        } else if (ns) {
+          p.segments.push({ x: ns.x, y: ns.y });
+        } else if (os) {
+          p.segments.push({ x: os.x, y: os.y });
+        }
+      }
+      players.push(p);
+    } else {
+      players.push({ ...np, segments: cloneSegments(np.segments) });
+    }
+  }
+
+  // Interpolate food
+  const foods = [];
+  const oldFoodMap = new Map((a.foods || []).map((f) => [f.id, f]));
+  for (const nf of b.foods || []) {
+    const of = oldFoodMap.get(nf.id);
+    if (of) {
+      foods.push({ ...nf, x: lerp(of.x, nf.x, alpha), y: lerp(of.y, nf.y, alpha) });
+    } else {
+      foods.push({ ...nf });
+    }
+  }
+
+  return { world: b.world, players, foods };
+}
+
 export default function Home() {
   const canvasRef = useRef(null);
   const socketRef = useRef(null);
   const stateRef = useRef(null);
+  const snapshotsRef = useRef([]);
   const myIdRef = useRef(null);
   const mouseRef = useRef({ x: 0, y: 0, down: false });
   const cameraRef = useRef({ x: 0, y: 0, scale: 1 });
+  const dprRef = useRef(1);
   const rafRef = useRef(null);
   const uiTimerRef = useRef(null);
   const connectedRef = useRef(false);
@@ -19,7 +89,7 @@ export default function Home() {
   const [score, setScore] = useState(10);
   const [leaderboard, setLeaderboard] = useState([]);
 
-  // Load saved defaults
+  // Load saved defaults and set up HiDPI canvas
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const savedName = localStorage.getItem('slither-name');
@@ -30,8 +100,12 @@ export default function Home() {
     const resize = () => {
       const c = canvasRef.current;
       if (!c) return;
-      c.width = window.innerWidth;
-      c.height = window.innerHeight;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      dprRef.current = dpr;
+      c.width = Math.floor(window.innerWidth * dpr);
+      c.height = Math.floor(window.innerHeight * dpr);
+      c.style.width = window.innerWidth + 'px';
+      c.style.height = window.innerHeight + 'px';
     };
     resize();
     window.addEventListener('resize', resize);
@@ -91,10 +165,15 @@ export default function Home() {
 
       socket.on('state', (s) => {
         stateRef.current = s;
+        const now = performance.now();
+        const snaps = snapshotsRef.current;
+        snaps.push({ t: now, state: s });
+        while (snaps.length > SNAPSHOT_BUFFER) snaps.shift();
       });
 
       socket.on('disconnect', () => {
         connectedRef.current = false;
+        snapshotsRef.current = [];
         setOverlayVisible(true);
         setStatusMsg('Disconnected from server.');
         setPlayDisabled(false);
@@ -130,10 +209,9 @@ export default function Home() {
   function sendInput() {
     const socket = socketRef.current;
     if (!socket || !connectedRef.current) return;
-    const c = canvasRef.current;
-    if (!c) return;
-    const cx = c.width / 2;
-    const cy = c.height / 2;
+    if (typeof window === 'undefined') return;
+    const cx = window.innerWidth / 2;
+    const cy = window.innerHeight / 2;
     const angle = Math.atan2(mouseRef.current.y - cy, mouseRef.current.x - cx);
     socket.emit('input', { angle, boost: mouseRef.current.down });
   }
@@ -153,24 +231,86 @@ export default function Home() {
     setLeaderboard(board);
   }
 
+  function getInterpolatedState() {
+    const snaps = snapshotsRef.current;
+    if (snaps.length === 0) return null;
+    const now = performance.now();
+    const renderTime = now - RENDER_DELAY;
+
+    if (renderTime <= snaps[0].t) return snaps[0].state;
+    if (renderTime >= snaps[snaps.length - 1].t) return snaps[snaps.length - 1].state;
+
+    for (let i = 0; i < snaps.length - 1; i++) {
+      const a = snaps[i];
+      const b = snaps[i + 1];
+      if (renderTime >= a.t && renderTime < b.t) {
+        const alpha = (renderTime - a.t) / (b.t - a.t);
+        return interpolateStates(a.state, b.state, alpha);
+      }
+    }
+    return snaps[snaps.length - 1].state;
+  }
+
+  function buildPath(ctx, segments) {
+    ctx.beginPath();
+    ctx.moveTo(segments[0].x, segments[0].y);
+    for (let i = 1; i < segments.length; i++) {
+      ctx.lineTo(segments[i].x, segments[i].y);
+    }
+  }
+
   function drawSnake(s) {
     if (!s.alive || !s.segments || s.segments.length < 2) return;
     const ctx = canvasRef.current.getContext('2d');
     const baseR = s.radius;
 
-    ctx.beginPath();
-    ctx.moveTo(s.segments[0].x, s.segments[0].y);
-    for (let i = 1; i < s.segments.length; i++) ctx.lineTo(s.segments[i].x, s.segments[i].y);
+    buildPath(ctx, s.segments);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
+
+    // Neon glow shadow
+    ctx.save();
+    ctx.shadowBlur = baseR * (s.boosting ? 2.8 : 1.6);
+    ctx.shadowColor = s.color;
+
+    // Dark outline
+    ctx.lineWidth = baseR * 2.6;
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+    ctx.stroke();
+
+    // Main colored body
+    buildPath(ctx, s.segments);
     ctx.lineWidth = baseR * 2;
     ctx.strokeStyle = s.color;
     ctx.stroke();
+    ctx.restore();
 
-    ctx.lineWidth = baseR * 1.15;
-    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+    // Glossy highlight
+    buildPath(ctx, s.segments);
+    ctx.save();
+    ctx.shadowBlur = 0;
+    ctx.lineWidth = baseR * 0.75;
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
     ctx.stroke();
+    ctx.restore();
 
+    // Boost trail particles near tail
+    if (s.boosting && s.segments.length > 4) {
+      ctx.save();
+      ctx.shadowBlur = 10;
+      ctx.shadowColor = s.color;
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      for (let i = 1; i <= 4; i++) {
+        const seg = s.segments[s.segments.length - i * 3];
+        if (!seg) continue;
+        ctx.beginPath();
+        ctx.arc(seg.x, seg.y, baseR * 0.35, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // Eyes
     const head = s.segments[0];
     const a = s.angle;
     const perp = a + Math.PI / 2;
@@ -184,33 +324,72 @@ export default function Home() {
       x: head.x + Math.cos(a) * eyeDist - Math.cos(perp) * eyeR * 0.9,
       y: head.y + Math.sin(a) * eyeDist - Math.sin(perp) * eyeR * 0.9
     };
+
+    ctx.save();
     ctx.fillStyle = '#fff';
+    ctx.shadowBlur = 4;
+    ctx.shadowColor = 'rgba(0,0,0,0.6)';
     ctx.beginPath(); ctx.arc(eye1.x, eye1.y, eyeR, 0, Math.PI * 2); ctx.fill();
     ctx.beginPath(); ctx.arc(eye2.x, eye2.y, eyeR, 0, Math.PI * 2); ctx.fill();
 
     ctx.fillStyle = '#111';
+    ctx.shadowBlur = 0;
     const pupilR = eyeR * 0.4;
     ctx.beginPath(); ctx.arc(eye1.x + Math.cos(a) * pupilR * 0.6, eye1.y + Math.sin(a) * pupilR * 0.6, pupilR, 0, Math.PI * 2); ctx.fill();
     ctx.beginPath(); ctx.arc(eye2.x + Math.cos(a) * pupilR * 0.6, eye2.y + Math.sin(a) * pupilR * 0.6, pupilR, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
 
+    // Name
+    ctx.save();
     ctx.font = `bold ${Math.max(12, baseR * 0.9)}px 'Segoe UI',sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
+    ctx.shadowBlur = 4;
+    ctx.shadowColor = 'rgba(0,0,0,0.8)';
     ctx.fillStyle = 'rgba(0,0,0,0.35)';
     ctx.fillText(s.name, head.x, head.y - baseR - 5);
     ctx.fillStyle = '#fff';
     ctx.fillText(s.name, head.x, head.y - baseR - 6);
+    ctx.restore();
+  }
+
+  function drawFood(ctx, f, now) {
+    const pulse = 1 + Math.sin(now / 180 + f.id) * 0.12;
+    const r = f.size * pulse;
+    ctx.save();
+    ctx.shadowBlur = 12;
+    ctx.shadowColor = f.color;
+    const g = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, r * 1.6);
+    g.addColorStop(0, '#ffffff');
+    g.addColorStop(0.45, f.color);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, r * 1.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
   }
 
   function draw() {
     const c = canvasRef.current;
-    if (!c) return;
+    if (!c || typeof window === 'undefined') return;
     const ctx = c.getContext('2d');
-    ctx.fillStyle = '#111827';
+    const dpr = dprRef.current;
+    const cssW = window.innerWidth;
+    const cssH = window.innerHeight;
+
+    // Vignette background
+    const bg = ctx.createRadialGradient(cssW / 2, cssH / 2, 0, cssW / 2, cssH / 2, Math.max(cssW, cssH));
+    bg.addColorStop(0, '#162030');
+    bg.addColorStop(1, '#05070a');
+    ctx.fillStyle = bg;
     ctx.fillRect(0, 0, c.width, c.height);
 
-    const state = stateRef.current;
+    const state = getInterpolatedState();
     if (!state) return;
+
+    ctx.save();
+    ctx.scale(dpr, dpr);
 
     const me = state.players.find((p) => p.id === myIdRef.current);
     if (me) {
@@ -220,20 +399,23 @@ export default function Home() {
       cameraRef.current.scale += (targetScale - cameraRef.current.scale) * 0.05;
     }
 
+    const cx = cssW / 2;
+    const cy = cssH / 2;
     ctx.save();
-    const cx = c.width / 2;
-    const cy = c.height / 2;
     ctx.translate(cx, cy);
     ctx.scale(cameraRef.current.scale, cameraRef.current.scale);
     ctx.translate(-cameraRef.current.x, -cameraRef.current.y);
 
     const gridSize = 80;
-    const viewW = c.width / cameraRef.current.scale;
-    const viewH = c.height / cameraRef.current.scale;
+    const viewW = cssW / cameraRef.current.scale;
+    const viewH = cssH / cameraRef.current.scale;
     const startX = Math.floor((cameraRef.current.x - viewW / 2) / gridSize) * gridSize;
     const startY = Math.floor((cameraRef.current.y - viewH / 2) / gridSize) * gridSize;
-    ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+
+    ctx.save();
+    ctx.strokeStyle = 'rgba(100,180,255,0.04)';
     ctx.lineWidth = 1;
+    ctx.shadowBlur = 0;
     ctx.beginPath();
     for (let x = startX; x < cameraRef.current.x + viewW / 2; x += gridSize) {
       ctx.moveTo(x, cameraRef.current.y - viewH / 2);
@@ -244,26 +426,30 @@ export default function Home() {
       ctx.lineTo(cameraRef.current.x + viewW / 2, y);
     }
     ctx.stroke();
+    ctx.restore();
 
-    ctx.strokeStyle = 'rgba(100,180,255,0.25)';
-    ctx.lineWidth = 8;
+    // Glowing world border
+    ctx.save();
+    ctx.shadowBlur = 24;
+    ctx.shadowColor = 'rgba(100,180,255,0.7)';
+    ctx.strokeStyle = 'rgba(120,200,255,0.9)';
+    ctx.lineWidth = 6;
     ctx.strokeRect(-state.world / 2, -state.world / 2, state.world, state.world);
+    ctx.restore();
+
+    const now = performance.now();
 
     if (state.foods) {
       for (const f of state.foods) {
-        ctx.fillStyle = f.color;
-        ctx.globalAlpha = 0.9;
-        ctx.beginPath();
-        ctx.arc(f.x, f.y, f.size, 0, Math.PI * 2);
-        ctx.fill();
+        drawFood(ctx, f, now);
       }
-      ctx.globalAlpha = 1;
     }
 
     const snakes = state.players.slice().sort((a, b) => a.score - b.score);
     for (const s of snakes) drawSnake(s);
 
-    ctx.restore();
+    ctx.restore(); // world transform
+    ctx.restore(); // dpr scale
   }
 
   // Input listeners
